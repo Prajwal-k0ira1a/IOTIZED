@@ -1,0 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root {
+  --bg-main: #14151a;
+  --bg-panel: #1b1c22;
+  --bg-sidebar: #17181d;
+  --bg-hover: #22242b;
+  --border-color: #272931;
+  
+  --text-primary: #ffffff;
+  --text-secondary: #8c8f9b;
+  --text-muted: #5a5c66;
+  
+  --accent-cyan: #00f0ff;
+  --accent-cyan-dark: rgba(0, 240, 255, 0.15);
+  --accent-peach: #ffdeb3;
+  --accent-peach-hover: #ffd090;
+  --accent-red: #d31a1f;
+  --accent-pink: #ffb3b3;
+  --accent-yellow: #f5d061;
+
+  --font-ui: 'Inter', sans-serif;
+  --font-heading: 'Space Grotesk', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 15px;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  outline: none;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
