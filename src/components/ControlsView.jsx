@@ -52,31 +52,6 @@ const ControlsView = () => (
             </div>
           </div>
         </div>
-        
-        <div className="charts-row">
-          <div className="panel chart-panel">
-            <div className="chart-header">
-              <span>Motor Temperature</span>
-              <span>42.4°C</span>
-            </div>
-            <div className="bar-chart">
-              {[30, 32, 35, 36, 40, 42, 45, 50, 55, 60].map((h, i) => (
-                <div key={i} className="chart-bar" style={{height: `${h}%`, opacity: 0.3 + (i*0.07)}}></div>
-              ))}
-            </div>
-          </div>
-          <div className="panel chart-panel">
-            <div className="chart-header">
-              <span>Power Load</span>
-              <span>18.2W</span>
-            </div>
-            <div className="bar-chart">
-              {[20, 22, 18, 25, 20, 30, 28, 35, 25, 40].map((h, i) => (
-                <div key={i} className="chart-bar" style={{height: `${h}%`, opacity: 0.3 + (i*0.07)}}></div>
-              ))}
-            </div>
-          </div>
-        </div>
       </div>
       
       <div className="controls-col-side">
