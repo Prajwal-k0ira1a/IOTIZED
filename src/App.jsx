@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import './App.css';
 import { 
   Settings, Terminal as TerminalIcon, HelpCircle, LayoutDashboard, 
-  Gamepad2, FolderOpen, Code2, Activity, History
+  Gamepad2, FolderOpen, Code2
 } from 'lucide-react';
 
 import DashboardView from './components/DashboardView';
@@ -60,18 +60,16 @@ function App() {
             
             {activeTab !== 'dashboard' && activeTab !== 'terminal' && (
               <div style={{padding: '0 24px', marginBottom: '16px'}}>
-                <button className="btn-emergency peach" style={{margin: 0, width: '100%', padding: '16px', borderRadius: '4px', backgroundColor: 'var(--accent-pink)', color: '#111', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em'}}>Emergency Stop</button>
+                <button className="btn-emergency" style={{borderRadius: '4px'}}>
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '16px', border: '2px solid white', borderRadius: '50%', padding: '2px'}}>
+                     <div style={{width: '100%', height: '100%', backgroundColor: 'white', clipPath: 'polygon(20% 0%, 0% 20%, 30% 50%, 0% 80%, 20% 100%, 50% 70%, 80% 100%, 100% 80%, 70% 50%, 100% 20%, 80% 0%, 50% 30%)'}}></div>
+                  </div>
+                  Emergency Stop
+                </button>
               </div>
             )}
 
-            <div className="nav-item">
-              <Activity size={20} />
-              Diagnostics
-            </div>
-            <div className="nav-item">
-              <History size={20} />
-              Logs
-            </div>
+
           </nav>
           
           <div className="sidebar-footer">
