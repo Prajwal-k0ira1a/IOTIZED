@@ -1,7 +1,28 @@
-import React from 'react';
+import React, { useState } from 'react';
 import SolidTriangle from './SolidTriangle';
 
-const ControlsView = () => (
+const ControlsView = ({ serial }) => {
+  const [jogStep, setJogStep] = useState(1.0);
+  const [feedRate, setFeedRate] = useState(1000);
+
+  const jog = (dx, dy, dz = 0) => {
+    if (!serial || !serial.connected) return;
+    const x = (dx * jogStep).toFixed(3);
+    const y = (dy * jogStep).toFixed(3);
+    const z = (dz * jogStep).toFixed(3);
+    
+    // Using standard G0 instead of $J for compatibility with GRBL v0.9 and older CNC shields
+    let cmd = `G91 G0 F${feedRate} `;
+    if (dx !== 0) cmd += `X${x} `;
+    if (dy !== 0) cmd += `Y${y} `;
+    if (dz !== 0) cmd += `Z${z}`;
+    
+    serial.sendCommand(cmd.trim());
+    // Switch back to absolute mode just in case
+    setTimeout(() => serial.sendCommand('G90'), 50);
+  };
+
+  return (
   <div style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
     <div className="page-header">
       <div>
@@ -9,8 +30,8 @@ const ControlsView = () => (
         <div className="breadcrumbs" style={{color: 'var(--text-muted)'}}>Axis_Calibration // Jog_Interface</div>
       </div>
       <div style={{display: 'flex', gap: '16px'}}>
-        <button className="btn-secondary" style={{padding: '12px 24px'}}>Set Zero</button>
-        <button className="btn-primary" style={{margin: 0, padding: '12px 24px', width: 'auto', color: '#111'}}>Home All Axes</button>
+        <button className="btn-secondary" style={{padding: '12px 24px'}} onClick={() => serial?.sendCommand('G92 X0 Y0 Z0')}>Set Zero</button>
+        <button className="btn-primary" style={{margin: 0, padding: '12px 24px', width: 'auto', color: '#111'}} onClick={() => serial?.sendCommand('$H')}>Home All Axes</button>
       </div>
     </div>
     
@@ -21,33 +42,33 @@ const ControlsView = () => (
             <span>Kinetic_Input_Array</span>
             <div style={{display: 'flex', border: '1px solid var(--border-color)', borderRadius: '4px', overflow: 'hidden'}}>
               <span style={{padding: '6px 12px', fontSize: '0.6rem', borderRight: '1px solid var(--border-color)'}}>JOG STEP</span>
-              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: 'var(--bg-main)'}}>0.1</button>
-              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: 'var(--accent-cyan)', color: 'black'}}>1.0</button>
-              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: 'var(--bg-main)'}}>10</button>
+              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: jogStep === 0.1 ? 'var(--accent-cyan)' : 'var(--bg-main)', color: jogStep === 0.1 ? 'black' : 'white'}} onClick={() => setJogStep(0.1)}>0.1</button>
+              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: jogStep === 1.0 ? 'var(--accent-cyan)' : 'var(--bg-main)', color: jogStep === 1.0 ? 'black' : 'white'}} onClick={() => setJogStep(1.0)}>1.0</button>
+              <button style={{padding: '6px 12px', fontSize: '0.65rem', backgroundColor: jogStep === 10.0 ? 'var(--accent-cyan)' : 'var(--bg-main)', color: jogStep === 10.0 ? 'black' : 'white'}} onClick={() => setJogStep(10.0)}>10</button>
             </div>
           </div>
           
           <div className="jog-interface">
             <div className="xy-pad">
-              <button className="pad-btn pad-up-left"><SolidTriangle angle={-45} /></button>
-              <button className="pad-btn pad-up"><SolidTriangle angle={0} /></button>
-              <button className="pad-btn pad-up-right"><SolidTriangle angle={45} /></button>
-              <button className="pad-btn pad-left"><SolidTriangle angle={-90} /></button>
-              <button className="pad-btn pad-right"><SolidTriangle angle={90} /></button>
-              <button className="pad-btn pad-down-left"><SolidTriangle angle={-135} /></button>
-              <button className="pad-btn pad-down"><SolidTriangle angle={180} /></button>
-              <button className="pad-btn pad-down-right"><SolidTriangle angle={135} /></button>
+              <button className="pad-btn pad-up-left" onClick={() => jog(-1, 1)}><SolidTriangle angle={-45} /></button>
+              <button className="pad-btn pad-up" onClick={() => jog(0, 1)}><SolidTriangle angle={0} /></button>
+              <button className="pad-btn pad-up-right" onClick={() => jog(1, 1)}><SolidTriangle angle={45} /></button>
+              <button className="pad-btn pad-left" onClick={() => jog(-1, 0)}><SolidTriangle angle={-90} /></button>
+              <button className="pad-btn pad-right" onClick={() => jog(1, 0)}><SolidTriangle angle={90} /></button>
+              <button className="pad-btn pad-down-left" onClick={() => jog(-1, -1)}><SolidTriangle angle={-135} /></button>
+              <button className="pad-btn pad-down" onClick={() => jog(0, -1)}><SolidTriangle angle={180} /></button>
+              <button className="pad-btn pad-down-right" onClick={() => jog(1, -1)}><SolidTriangle angle={135} /></button>
               <div className="pad-center">XY_PAD</div>
             </div>
             
             <div className="z-pad">
-              <button className="pad-btn" style={{position: 'relative'}}><SolidTriangle angle={0} /></button>
+              <button className="pad-btn" style={{position: 'relative'}} onClick={() => jog(0, 0, 1)}><SolidTriangle angle={0} /></button>
               <div className="z-label">Z</div>
-              <button className="pad-btn" style={{position: 'relative'}}><SolidTriangle angle={180} /></button>
+              <button className="pad-btn" style={{position: 'relative'}} onClick={() => jog(0, 0, -1)}><SolidTriangle angle={180} /></button>
               <div style={{fontSize: '0.55rem', color: 'var(--text-secondary)', marginTop: '8px', textAlign: 'center'}}>PEN STATE</div>
               <div className="pen-state">
-                <button className="pen-btn active">DOWN</button>
-                <button className="pen-btn" style={{backgroundColor: 'var(--bg-main)'}}>UP</button>
+                <button className="pen-btn" style={{backgroundColor: 'var(--bg-main)'}} onClick={() => serial?.sendCommand('M3 S1000')}>DOWN</button>
+                <button className="pen-btn" style={{backgroundColor: 'var(--bg-main)'}} onClick={() => serial?.sendCommand('M5')}>UP</button>
               </div>
             </div>
           </div>
@@ -60,15 +81,15 @@ const ControlsView = () => (
           <div className="pos-list">
             <div className="pos-item">
               <div className="pos-label">X_AXIS</div>
-              <div className="pos-val">142.080 <span className="pos-unit">MM</span></div>
+              <div className="pos-val">{serial?.position?.x?.toFixed(3) || '0.000'} <span className="pos-unit">MM</span></div>
             </div>
             <div className="pos-item">
               <div className="pos-label">Y_AXIS</div>
-              <div className="pos-val">094.215 <span className="pos-unit">MM</span></div>
+              <div className="pos-val">{serial?.position?.y?.toFixed(3) || '0.000'} <span className="pos-unit">MM</span></div>
             </div>
             <div className="pos-item">
               <div className="pos-label">Z_AXIS</div>
-              <div className="pos-val">005.000 <span className="pos-unit">MM</span></div>
+              <div className="pos-val">{serial?.position?.z?.toFixed(3) || '0.000'} <span className="pos-unit">MM</span></div>
             </div>
           </div>
         </div>
@@ -90,6 +111,7 @@ const ControlsView = () => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
 export default ControlsView;

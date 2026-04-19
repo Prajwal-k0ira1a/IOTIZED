@@ -1,7 +1,25 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Terminal as TerminalIcon, Trash, Download, RefreshCw } from 'lucide-react';
 
-const TerminalView = () => (
+const TerminalView = ({ serial }) => {
+  const [input, setInput] = useState('');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    if (autoScroll && endRef.current) {
+      endRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [serial?.logs, autoScroll]);
+
+  const handleSend = () => {
+    if (input.trim() && serial) {
+      serial.sendCommand(input.trim());
+      setInput('');
+    }
+  };
+
+  return (
   <div style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
     <div className="terminal-layout">
       <div className="terminal-main">
@@ -13,35 +31,36 @@ const TerminalView = () => (
           </div>
           <div className="term-title">Console_Output.Log</div>
           <div className="term-actions">
-            <button className="term-btn"><Trash size={12}/> Clear Log</button>
+            <button className="term-btn" onClick={() => serial?.setLogs([])}><Trash size={12}/> Clear Log</button>
             <button className="term-btn"><Download size={12}/> Export Log</button>
-            <button className="term-btn active"><RefreshCw size={12}/> Auto-Scroll</button>
+            <button className={`term-btn ${autoScroll ? 'active' : ''}`} onClick={() => setAutoScroll(!autoScroll)}><RefreshCw size={12}/> Auto-Scroll</button>
           </div>
         </div>
         
-        <div className="term-output">
-          <div className="log-line"><span className="log-time">12:44:01</span><span className="log-msg">G21 ; set units to millimeters</span></div>
-          <div className="log-line"><span className="log-time">12:44:01</span><span className="log-msg response">&gt;&gt; ok</span></div>
-          <div className="log-line"><span className="log-time">12:44:02</span><span className="log-msg">G90 ; use absolute coordinates</span></div>
-          <div className="log-line"><span className="log-time">12:44:02</span><span className="log-msg response">&gt;&gt; ok</span></div>
-          <div className="log-line"><span className="log-time">12:44:05</span><span className="log-msg">M104 S200 ; set extruder temp</span></div>
-          <div className="log-line"><span className="log-time">12:44:10</span><span className="log-msg error">[SYSTEM_ERROR] - HEATER_FAULT: TO SENSOR DISCONNECTED</span></div>
-          <div className="log-line"><span className="log-time">12:44:10</span><span className="log-msg response">&gt;&gt; halt triggered</span></div>
-          <div className="log-line"><span className="log-time">12:45:12</span><span className="log-msg">M999 ; reset system after fault</span></div>
-          <div className="log-line"><span className="log-time">12:45:13</span><span className="log-msg response">&gt;&gt; system re-initialized. ready.</span></div>
-          <div className="log-line"><span className="log-time">12:45:15</span><span className="log-msg">G28 X0 Y0 ; homing x and y axes</span></div>
-          <div className="log-line"><span className="log-time">12:45:18</span><span className="log-msg response">&gt;&gt; homing complete</span></div>
-          <div className="log-line"><span className="log-time">12:45:20</span><span className="log-msg">G1 F200 E3 ; prime extruder</span></div>
-          <div className="log-line"><span className="log-time">12:45:20</span><span className="log-msg response">&gt;&gt; ok</span></div>
+        <div className="term-output" style={{overflowY: 'auto', flex: 1}}>
+          {serial?.logs.map((log, i) => (
+            <div key={i} className="log-line">
+              <span className="log-time">{log.time}</span>
+              <span className={`log-msg ${log.type === 'response' ? 'response' : ''}`}>{log.msg}</span>
+            </div>
+          ))}
           
           <div className="log-prompt">root@plotter_os:~$ <span></span></div>
+          <div ref={endRef} />
         </div>
         
         <div className="term-input-bar">
           <TerminalIcon size={16} color="var(--text-secondary)" />
-          <input type="text" className="term-input" placeholder="ENTER G-CODE COMMAND..." />
+          <input 
+            type="text" 
+            className="term-input" 
+            placeholder="ENTER G-CODE COMMAND..." 
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+          />
           <div style={{fontSize: '0.65rem', color: 'var(--text-muted)'}}>HEX_MODE: OFF</div>
-          <button className="btn-action-cyan" style={{margin: 0, padding: '8px 16px', fontSize: '0.75rem'}}>Send Cmd</button>
+          <button className="btn-action-cyan" style={{margin: 0, padding: '8px 16px', fontSize: '0.75rem'}} onClick={handleSend}>Send Cmd</button>
         </div>
       </div>
       
@@ -51,11 +70,11 @@ const TerminalView = () => (
           <div style={{display: 'flex', flexDirection: 'column', gap: '16px'}}>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline'}}>
               <span style={{fontSize: '0.6rem', color: 'var(--text-secondary)', letterSpacing: '0.05em'}}>X-AXIS_POS</span>
-              <span style={{fontFamily: 'var(--font-mono)', fontSize: '1.25rem'}}>142.04</span>
+              <span style={{fontFamily: 'var(--font-mono)', fontSize: '1.25rem'}}>{serial?.position?.x?.toFixed(2) || '0.00'}</span>
             </div>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline'}}>
               <span style={{fontSize: '0.6rem', color: 'var(--text-secondary)', letterSpacing: '0.05em'}}>Y-AXIS_POS</span>
-              <span style={{fontFamily: 'var(--font-mono)', fontSize: '1.25rem'}}>88.50</span>
+              <span style={{fontFamily: 'var(--font-mono)', fontSize: '1.25rem'}}>{serial?.position?.y?.toFixed(2) || '0.00'}</span>
             </div>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
               <span style={{fontSize: '0.6rem', color: 'var(--text-secondary)', letterSpacing: '0.05em'}}>BUFFER_LOAD</span>
@@ -78,6 +97,7 @@ const TerminalView = () => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
 export default TerminalView;
