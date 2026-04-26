@@ -19,6 +19,22 @@ const TerminalView = ({ serial }) => {
     }
   };
 
+  const handleExportLog = () => {
+    if (!serial?.logs?.length) return;
+
+    const content = serial.logs
+      .map((log) => `[${log.time}] ${log.type.toUpperCase()}: ${log.msg}`)
+      .join('\n');
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `plotter-log-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
   <div style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
     <div className="terminal-layout">
@@ -32,7 +48,7 @@ const TerminalView = ({ serial }) => {
           <div className="term-title">Console_Output.Log</div>
           <div className="term-actions">
             <button className="term-btn" onClick={() => serial?.setLogs([])}><Trash size={12}/> Clear Log</button>
-            <button className="term-btn"><Download size={12}/> Export Log</button>
+            <button className="term-btn" onClick={handleExportLog}><Download size={12}/> Export Log</button>
             <button className={`term-btn ${autoScroll ? 'active' : ''}`} onClick={() => setAutoScroll(!autoScroll)}><RefreshCw size={12}/> Auto-Scroll</button>
           </div>
         </div>

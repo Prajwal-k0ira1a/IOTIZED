@@ -6,9 +6,11 @@ export function useSerial() {
   const [logs, setLogs] = useState([]);
   const [position, setPosition] = useState({ x: 0, y: 0, z: 0 });
   const [status, setStatus] = useState('Disconnected');
+  const [lastEmergencyStopAt, setLastEmergencyStopAt] = useState(0);
   const readerRef = useRef(null);
   const writerRef = useRef(null);
   const keepReadingRef = useRef(true);
+  const abortSendRef = useRef(false);
 
   const connect = async () => {
     try {
@@ -25,6 +27,7 @@ export function useSerial() {
       const textEncoder = new TextEncoderStream();
       const writableStreamClosed = textEncoder.readable.pipeTo(selectedPort.writable);
       writerRef.current = textEncoder.writable.getWriter();
+      abortSendRef.current = false;
 
       setStatus('Connected');
       readLoop();
@@ -38,6 +41,7 @@ export function useSerial() {
 
   const disconnect = async () => {
     keepReadingRef.current = false;
+    abortSendRef.current = true;
     if (readerRef.current) {
       await readerRef.current.cancel();
       readerRef.current = null;
@@ -105,15 +109,56 @@ export function useSerial() {
   };
 
   const sendCommand = async (cmd) => {
-    if (!writerRef.current) return;
+    const trimmed = cmd?.trim();
+    if (!trimmed || !writerRef.current) return false;
+    abortSendRef.current = false;
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-    setLogs(prev => [...prev.slice(-99), { time, type: 'command', msg: cmd }]);
-    await writerRef.current.write(cmd + '\n');
+    setLogs(prev => [...prev.slice(-99), { time, type: 'command', msg: trimmed }]);
+    await writerRef.current.write(trimmed + '\n');
+    return true;
   };
 
   const sendRealtimeCommand = async (char) => {
-    if (!writerRef.current) return;
+    if (!writerRef.current) return false;
     await writerRef.current.write(char);
+    return true;
+  };
+
+  const sendGCode = async (commands) => {
+    abortSendRef.current = false;
+    const commandList = Array.isArray(commands) ? commands : [commands];
+    const validLines = commandList.filter(
+      (line) => line.trim() && !line.trim().startsWith(';')
+    );
+
+    for (const line of validLines) {
+      if (abortSendRef.current) {
+        break;
+      }
+      await sendCommand(line.trim());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+
+  const emergencyStop = async () => {
+    abortSendRef.current = true;
+    setLastEmergencyStopAt(Date.now());
+    setStatus('Emergency Stop');
+
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    setLogs(prev => [
+      ...prev.slice(-99),
+      { time, type: 'response', msg: 'Emergency stop requested' },
+    ]);
+
+    if (!writerRef.current) return;
+
+    try {
+      await writerRef.current.write('!');
+      await writerRef.current.write('\x18');
+    } catch (err) {
+      console.error('Emergency stop error:', err);
+    }
   };
 
   // Poll for status
@@ -127,5 +172,18 @@ export function useSerial() {
     return () => clearInterval(interval);
   }, [connected]);
 
-  return { connected, connect, disconnect, logs, setLogs, sendCommand, sendRealtimeCommand, position, status };
+  return {
+    connected,
+    connect,
+    disconnect,
+    logs,
+    setLogs,
+    sendCommand,
+    sendRealtimeCommand,
+    sendGCode,
+    emergencyStop,
+    lastEmergencyStopAt,
+    position,
+    status,
+  };
 }
