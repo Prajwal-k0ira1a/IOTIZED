@@ -18,6 +18,10 @@ import {
   PEN_SERVO_SETTLE_COMMAND,
   PEN_UP_COMMAND,
 } from "../constants/penControl";
+import {
+  measureHersheyText,
+  getHersheyTextStrokes,
+} from "../constants/hersheyFont";
 
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg"];
 const MAX_IMAGE_DIMENSION = 96;
@@ -25,6 +29,17 @@ const DARK_PIXEL_THRESHOLD = 160;
 const RAPID_FEED = 3000;
 const DRAW_FEED = 1200;
 const DEFAULT_STEP_DELAY = 500;
+const MIN_DARKNESS_THRESHOLD = 24;
+const IMAGE_TRACE_MODES = {
+  contour: {
+    label: "Trace outline",
+    gcodeLabel: "contour trace",
+  },
+  bitmap: {
+    label: "Filled bitmap scan",
+    gcodeLabel: "bitmap scan trace",
+  },
+};
 const DRAWING_MODES = {
   image: {
     title: "Image Drawing",
@@ -96,6 +111,14 @@ const loadImageElement = (source) =>
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error("Unable to load image"));
     image.src = source;
+  });
+
+const readFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => resolve(event.target?.result);
+    reader.onerror = () => reject(new Error("Unable to read image"));
+    reader.readAsDataURL(file);
   });
 
 const mapToRange = (value, maxValue, minCoordinate, maxCoordinate) => {
@@ -390,17 +413,100 @@ const ToolpathPreview = ({
   );
 };
 
-const buildImageGCode = (imageData, width, height, bounds) => {
+const buildImageGCode = (imageData, width, height, bounds, traceMode = "contour") => {
+  const modeConfig = IMAGE_TRACE_MODES[traceMode] ?? IMAGE_TRACE_MODES.contour;
+  const grayValues = new Uint8Array(width * height);
+  const alphaValues = new Uint8Array(width * height);
+  const histogram = new Array(256).fill(0);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const maskIndex = y * width + x;
+      const pixelIndex = maskIndex * 4;
+      const gray = Math.round(
+        imageData[pixelIndex] * 0.299 +
+          imageData[pixelIndex + 1] * 0.587 +
+          imageData[pixelIndex + 2] * 0.114,
+      );
+      const alpha = imageData[pixelIndex + 3];
+
+      grayValues[maskIndex] = gray;
+      alphaValues[maskIndex] = alpha;
+
+      if (alpha > 10) {
+        histogram[gray] += 1;
+      }
+    }
+  }
+
+  const getAutoThreshold = () => {
+    const total = histogram.reduce((sum, count) => sum + count, 0);
+    if (total === 0) return 255 - DARK_PIXEL_THRESHOLD;
+
+    let weightedSum = 0;
+    for (let index = 0; index < histogram.length; index += 1) {
+      weightedSum += index * histogram[index];
+    }
+
+    let backgroundWeight = 0;
+    let backgroundSum = 0;
+    let bestVariance = -1;
+    let threshold = 255 - DARK_PIXEL_THRESHOLD;
+
+    for (let index = 0; index < histogram.length; index += 1) {
+      backgroundWeight += histogram[index];
+      if (backgroundWeight === 0) continue;
+
+      const foregroundWeight = total - backgroundWeight;
+      if (foregroundWeight === 0) break;
+
+      backgroundSum += index * histogram[index];
+      const backgroundMean = backgroundSum / backgroundWeight;
+      const foregroundMean = (weightedSum - backgroundSum) / foregroundWeight;
+      const betweenClassVariance =
+        backgroundWeight *
+        foregroundWeight *
+        (backgroundMean - foregroundMean) *
+        (backgroundMean - foregroundMean);
+
+      if (betweenClassVariance > bestVariance) {
+        bestVariance = betweenClassVariance;
+        threshold = index;
+      }
+    }
+
+    return threshold;
+  };
+
+  const autoGrayThreshold = getAutoThreshold();
+  const darkPixelMask = new Uint8Array(width * height);
+
+  for (let index = 0; index < darkPixelMask.length; index += 1) {
+    const darkness = 255 - grayValues[index];
+    darkPixelMask[index] =
+      alphaValues[index] > 10 &&
+      grayValues[index] <= autoGrayThreshold &&
+      darkness >= MIN_DARKNESS_THRESHOLD
+        ? 1
+        : 0;
+  }
+
   const commands = [
-    "; Generated from image upload",
+    `; Generated from image upload (${modeConfig.gcodeLabel})`,
     "G21 ; millimeters",
     "G90 ; absolute positioning",
     `; Bounds X${bounds.xMin}..X${bounds.xMax} Y${bounds.yMin}..Y${bounds.yMax}`,
+    `; Auto threshold: grayscale <= ${autoGrayThreshold}`,
     PEN_UP_COMMAND,
     PEN_SERVO_SETTLE_COMMAND,
     `G0 F${RAPID_FEED}`,
     `G1 F${DRAW_FEED}`,
   ];
+
+  const isDarkPixel = (x, y) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    return darkPixelMask[y * width + x] === 1;
+  };
 
   let minXPixel = width;
   let maxXPixel = -1;
@@ -409,15 +515,7 @@ const buildImageGCode = (imageData, width, height, bounds) => {
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      const pixelIndex = (y * width + x) * 4;
-      const alpha = imageData[pixelIndex + 3];
-      const darkness =
-        255 -
-        (imageData[pixelIndex] * 0.299 +
-          imageData[pixelIndex + 1] * 0.587 +
-          imageData[pixelIndex + 2] * 0.114);
-
-      if (!(alpha > 10 && darkness >= DARK_PIXEL_THRESHOLD)) continue;
+      if (!isDarkPixel(x, y)) continue;
 
       minXPixel = Math.min(minXPixel, x);
       maxXPixel = Math.max(maxXPixel, x);
@@ -436,6 +534,7 @@ const buildImageGCode = (imageData, width, height, bounds) => {
     return {
       content: commands.join("\n"),
       segments: 0,
+      traceMode,
       actualSize: {
         width: 0,
         height: 0,
@@ -455,8 +554,8 @@ const buildImageGCode = (imageData, width, height, bounds) => {
   const absWidth = Math.abs(bounds.xMax - bounds.xMin);
   const absHeight = Math.abs(bounds.yMax - bounds.yMin);
 
-  const bboxW = Math.max(maxXPixel - minXPixel, 1);
-  const bboxH = Math.max(maxYPixel - minYPixel, 1);
+  const bboxW = Math.max(maxXPixel - minXPixel + 1, 1);
+  const bboxH = Math.max(maxYPixel - minYPixel + 1, 1);
 
   const mmPerPixel = Math.min(absWidth / bboxW, absHeight / bboxH);
 
@@ -474,61 +573,163 @@ const buildImageGCode = (imageData, width, height, bounds) => {
     return formatCoordinate(offsetY + physYDir * (normalized * mmPerPixel));
   };
 
-  let segments = 0;
+  if (traceMode === "bitmap") {
+    let segments = 0;
+    let rowIndex = 0;
+
+    for (let y = minYPixel; y <= maxYPixel; y += 1) {
+      const runs = [];
+      let runStart = null;
+
+      for (let x = minXPixel; x <= maxXPixel + 1; x += 1) {
+        const isDark = x <= maxXPixel && isDarkPixel(x, y);
+
+        if (isDark && runStart === null) {
+          runStart = x;
+        }
+
+        if ((!isDark || x > maxXPixel) && runStart !== null) {
+          runs.push({ start: runStart, end: x });
+          runStart = null;
+        }
+      }
+
+      const orderedRuns = rowIndex % 2 === 0 ? runs : [...runs].reverse();
+      for (const run of orderedRuns) {
+        const drawLeftToRight = rowIndex % 2 === 0;
+        const startX = drawLeftToRight ? run.start : run.end;
+        const endX = drawLeftToRight ? run.end : run.start;
+        const centerY = y + 0.5;
+
+        commands.push(`G0 X${mapPixelX(startX)} Y${mapPixelY(centerY)}`);
+        commands.push(PEN_DOWN_COMMAND);
+        commands.push(PEN_SERVO_SETTLE_COMMAND);
+        commands.push(`G1 X${mapPixelX(endX)} Y${mapPixelY(centerY)}`);
+        commands.push(PEN_UP_COMMAND);
+        commands.push(PEN_SERVO_SETTLE_COMMAND);
+        segments += 1;
+      }
+
+      rowIndex += 1;
+    }
+
+    commands.push(`G0 X${formatCoordinate(bounds.xMin)} Y${formatCoordinate(bounds.yMin)}`);
+    commands.push(PEN_UP_COMMAND);
+    commands.push(PEN_SERVO_SETTLE_COMMAND);
+
+    return {
+      content: commands.join("\n"),
+      segments,
+      traceMode,
+      actualSize: {
+        width: formatCoordinate(actualWidth),
+        height: formatCoordinate(actualHeight),
+      },
+      actualBounds: {
+        xMin: formatCoordinate(offsetX),
+        xMax: formatCoordinate(offsetX + physXDir * actualWidth),
+        yMin: formatCoordinate(offsetY),
+        yMax: formatCoordinate(offsetY + physYDir * actualHeight),
+      },
+    };
+  }
+
+  const pointKey = (point) => `${point.x},${point.y}`;
+  const edgeKey = (start, end) => `${pointKey(start)}>${pointKey(end)}`;
+  const edgeMap = new Map();
+
+  const addEdge = (start, end) => {
+    const edge = { start, end, key: edgeKey(start, end), used: false };
+    const key = pointKey(start);
+    if (!edgeMap.has(key)) edgeMap.set(key, []);
+    edgeMap.get(key).push(edge);
+  };
 
   for (let y = minYPixel; y <= maxYPixel; y += 1) {
-    let x = 0;
+    for (let x = minXPixel; x <= maxXPixel; x += 1) {
+      if (!isDarkPixel(x, y)) continue;
 
-    while (x < width) {
-      const pixelIndex = (y * width + x) * 4;
-      const alpha = imageData[pixelIndex + 3];
-      const darkness =
-        255 -
-        (imageData[pixelIndex] * 0.299 +
-          imageData[pixelIndex + 1] * 0.587 +
-          imageData[pixelIndex + 2] * 0.114);
-
-      if (!(alpha > 10 && darkness >= DARK_PIXEL_THRESHOLD)) {
-        x += 1;
-        continue;
+      if (!isDarkPixel(x, y - 1)) {
+        addEdge({ x, y }, { x: x + 1, y });
       }
-
-      if (x < minXPixel) {
-        x = minXPixel;
-        continue;
+      if (!isDarkPixel(x + 1, y)) {
+        addEdge({ x: x + 1, y }, { x: x + 1, y: y + 1 });
       }
-
-      if (x > maxXPixel) break;
-
-      const startX = x;
-      let endX = x;
-
-      while (endX + 1 < width && endX + 1 <= maxXPixel) {
-        const nextPixelIndex = (y * width + (endX + 1)) * 4;
-        const nextAlpha = imageData[nextPixelIndex + 3];
-        const nextDarkness =
-          255 -
-          (imageData[nextPixelIndex] * 0.299 +
-            imageData[nextPixelIndex + 1] * 0.587 +
-            imageData[nextPixelIndex + 2] * 0.114);
-
-        if (!(nextAlpha > 10 && nextDarkness >= DARK_PIXEL_THRESHOLD)) break;
-        endX += 1;
+      if (!isDarkPixel(x, y + 1)) {
+        addEdge({ x: x + 1, y: y + 1 }, { x, y: y + 1 });
       }
-
-      const plotY = mapPixelY(y);
-      const plotStartX = mapPixelX(startX);
-      const plotEndX = mapPixelX(endX);
-
-      commands.push(`G0 X${plotStartX} Y${plotY}`);
-      commands.push(PEN_DOWN_COMMAND);
-      commands.push(PEN_SERVO_SETTLE_COMMAND);
-      commands.push(`G1 X${plotEndX} Y${plotY}`);
-      commands.push(PEN_UP_COMMAND);
-      commands.push(PEN_SERVO_SETTLE_COMMAND);
-      segments += 1;
-      x = endX + 1;
+      if (!isDarkPixel(x - 1, y)) {
+        addEdge({ x, y: y + 1 }, { x, y });
+      }
     }
+  }
+
+  const edges = Array.from(edgeMap.values()).flat();
+  const simplifyPath = (points) => {
+    if (points.length <= 2) return points;
+
+    const simplified = [points[0]];
+
+    for (let index = 1; index < points.length - 1; index += 1) {
+      const previous = simplified[simplified.length - 1];
+      const current = points[index];
+      const next = points[index + 1];
+      const dx1 = Math.sign(current.x - previous.x);
+      const dy1 = Math.sign(current.y - previous.y);
+      const dx2 = Math.sign(next.x - current.x);
+      const dy2 = Math.sign(next.y - current.y);
+
+      if (dx1 !== dx2 || dy1 !== dy2) {
+        simplified.push(current);
+      }
+    }
+
+    simplified.push(points[points.length - 1]);
+    return simplified;
+  };
+
+  const tracedPaths = [];
+
+  for (const edge of edges) {
+    if (edge.used) continue;
+
+    edge.used = true;
+    const path = [edge.start, edge.end];
+    let cursor = edge.end;
+
+    while (pointKey(cursor) !== pointKey(path[0])) {
+      const nextEdge = edgeMap
+        .get(pointKey(cursor))
+        ?.find((candidate) => !candidate.used);
+
+      if (!nextEdge) break;
+
+      nextEdge.used = true;
+      path.push(nextEdge.end);
+      cursor = nextEdge.end;
+    }
+
+    if (path.length > 2) {
+      tracedPaths.push(simplifyPath(path));
+    }
+  }
+
+  let segments = 0;
+
+  for (const path of tracedPaths) {
+    const start = path[0];
+    commands.push(`G0 X${mapPixelX(start.x)} Y${mapPixelY(start.y)}`);
+    commands.push(PEN_DOWN_COMMAND);
+    commands.push(PEN_SERVO_SETTLE_COMMAND);
+
+    for (let index = 1; index < path.length; index += 1) {
+      const point = path[index];
+      commands.push(`G1 X${mapPixelX(point.x)} Y${mapPixelY(point.y)}`);
+      segments += 1;
+    }
+
+    commands.push(PEN_UP_COMMAND);
+    commands.push(PEN_SERVO_SETTLE_COMMAND);
   }
 
   commands.push(`G0 X${formatCoordinate(bounds.xMin)} Y${formatCoordinate(bounds.yMin)}`);
@@ -538,6 +739,7 @@ const buildImageGCode = (imageData, width, height, bounds) => {
   return {
     content: commands.join("\n"),
     segments,
+    traceMode,
     actualSize: {
       width: formatCoordinate(actualWidth),
       height: formatCoordinate(actualHeight),
@@ -551,13 +753,8 @@ const buildImageGCode = (imageData, width, height, bounds) => {
   };
 };
 
-const convertImageToGCode = async (file, bounds) => {
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (event) => resolve(event.target?.result);
-    reader.onerror = () => reject(new Error("Unable to read image"));
-    reader.readAsDataURL(file);
-  });
+const convertImageToGCode = async (file, bounds, traceMode = "contour") => {
+  const dataUrl = await readFileAsDataUrl(file);
 
   if (typeof dataUrl !== "string") {
     throw new Error("Image data was not readable");
@@ -590,6 +787,7 @@ const convertImageToGCode = async (file, bounds) => {
     width,
     height,
     bounds,
+    traceMode,
   );
 
   return {
@@ -597,70 +795,141 @@ const convertImageToGCode = async (file, bounds) => {
     previewUrl: dataUrl,
     dimensions: { width, height },
     segments,
+    traceMode,
     targetBounds: bounds,
     actualSize,
     actualBounds,
   };
 };
 
-const convertTextToGCode = async (text, fontStyle, bounds) => {
-  const canvas = document.createElement("canvas");
-  canvas.width = 800;
-  canvas.height = 400;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  
-  if (!context) {
-    throw new Error("Canvas preview is not available");
+const convertTextToGCode = async (text, fontStyle, bounds, textSizePercent = 100) => {
+  const absWidth = Math.abs(bounds.xMax - bounds.xMin);
+  const absHeight = Math.abs(bounds.yMax - bounds.yMin);
+
+  // Measure text at scale=1 first, then fit into bounds
+  const rawSize = measureHersheyText(text, 1);
+  if (rawSize.width === 0 || rawSize.height === 0) {
+    throw new Error("Text produced no drawable content");
   }
 
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  
-  context.fillStyle = "#000000";
-  context.font = fontStyle;
-  context.textAlign = "center";
-  context.textBaseline = "middle";
-  context.fillText(text, canvas.width / 2, canvas.height / 2);
+  const sizeScale = clampSize(textSizePercent, 10, 100) / 100;
+  const fitScale = Math.min(absWidth / rawSize.width, absHeight / rawSize.height) * sizeScale;
+  const finalSize = measureHersheyText(text, fitScale);
 
-  const dataUrl = canvas.toDataURL("image/png");
-  const image = await loadImageElement(dataUrl);
+  const physXDir = bounds.xMax >= bounds.xMin ? 1 : -1;
+  const physYDir = bounds.yMax >= bounds.yMin ? 1 : -1;
 
-  const scale = Math.min(
-    1,
-    MAX_IMAGE_DIMENSION / Math.max(image.width, image.height),
-  );
-  const width = Math.max(1, Math.round(image.width * scale));
-  const height = Math.max(1, Math.round(image.height * scale));
+  // Place text at origin corner of bounds (no centering)
+  const xPad = 0;
+  const yPad = 0;
 
-  const processCanvas = document.createElement("canvas");
-  processCanvas.width = width;
-  processCanvas.height = height;
+  const strokes = getHersheyTextStrokes(text, fitScale, 0, 0);
 
-  const processContext = processCanvas.getContext("2d", { willReadFrequently: true });
-  if (!processContext) {
-    throw new Error("Canvas preview is not available");
+  const commands = [
+    "; Generated from text (Hershey vector font)",
+    `; Text: ${text}`,
+    "G21 ; millimeters",
+    "G90 ; absolute positioning",
+    `; Bounds X${bounds.xMin}..X${bounds.xMax} Y${bounds.yMin}..Y${bounds.yMax}`,
+    PEN_UP_COMMAND,
+    PEN_SERVO_SETTLE_COMMAND,
+    `G0 F${RAPID_FEED}`,
+    `G1 F${DRAW_FEED}`,
+  ];
+
+  let segments = 0;
+  let actualXMin = Infinity, actualXMax = -Infinity;
+  let actualYMin = Infinity, actualYMax = -Infinity;
+
+  const mapX = (x) => formatCoordinate(bounds.xMin + physXDir * (xPad + x));
+  const mapY = (y) => {
+    const plotY = physYDir >= 0 ? finalSize.height - y : y;
+    return formatCoordinate(bounds.yMin + physYDir * (yPad + plotY));
+  };
+
+  for (const stroke of strokes) {
+    if (stroke.length < 2) continue;
+
+    const [firstX, firstY] = stroke[0];
+    const startX = mapX(firstX);
+    const startY = mapY(firstY);
+    commands.push(`G0 X${startX} Y${startY}`);
+    commands.push(PEN_DOWN_COMMAND);
+    commands.push(PEN_SERVO_SETTLE_COMMAND);
+
+    actualXMin = Math.min(actualXMin, startX);
+    actualXMax = Math.max(actualXMax, startX);
+    actualYMin = Math.min(actualYMin, startY);
+    actualYMax = Math.max(actualYMax, startY);
+
+    for (let i = 1; i < stroke.length; i++) {
+      const px = mapX(stroke[i][0]);
+      const py = mapY(stroke[i][1]);
+      commands.push(`G1 X${px} Y${py}`);
+      actualXMin = Math.min(actualXMin, px);
+      actualXMax = Math.max(actualXMax, px);
+      actualYMin = Math.min(actualYMin, py);
+      actualYMax = Math.max(actualYMax, py);
+    }
+
+    commands.push(PEN_UP_COMMAND);
+    commands.push(PEN_SERVO_SETTLE_COMMAND);
+    segments += 1;
   }
 
-  processContext.fillStyle = "#ffffff";
-  processContext.fillRect(0, 0, width, height);
-  processContext.drawImage(image, 0, 0, width, height);
+  commands.push(`G0 X${formatCoordinate(bounds.xMin)} Y${formatCoordinate(bounds.yMin)}`);
+  commands.push(PEN_UP_COMMAND);
+  commands.push(PEN_SERVO_SETTLE_COMMAND);
 
-  const { data } = processContext.getImageData(0, 0, width, height);
-  const { content, segments, actualSize, actualBounds } = buildImageGCode(
-    data,
-    width,
-    height,
-    bounds,
-  );
+  if (!Number.isFinite(actualXMin)) {
+    actualXMin = bounds.xMin; actualXMax = bounds.xMin;
+    actualYMin = bounds.yMin; actualYMax = bounds.yMin;
+  }
 
+  // Generate a preview image on canvas
+  const previewCanvas = document.createElement("canvas");
+  previewCanvas.width = 400;
+  previewCanvas.height = 200;
+  const ctx = previewCanvas.getContext("2d");
+  if (ctx) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, 400, 200);
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const pvScale = Math.min(360 / finalSize.width, 160 / finalSize.height);
+    const pvOffX = (400 - finalSize.width * pvScale) / 2;
+    const pvOffY = (200 - finalSize.height * pvScale) / 2;
+    for (const stroke of strokes) {
+      if (stroke.length < 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(pvOffX + stroke[0][0] * pvScale, pvOffY + stroke[0][1] * pvScale);
+      for (let i = 1; i < stroke.length; i++) {
+        ctx.lineTo(pvOffX + stroke[i][0] * pvScale, pvOffY + stroke[i][1] * pvScale);
+      }
+      ctx.stroke();
+    }
+  }
+  const previewUrl = previewCanvas.toDataURL("image/png");
+
+  const content = commands.join("\n");
   return {
     content,
-    previewUrl: dataUrl,
-    dimensions: { width, height },
+    previewUrl,
+    dimensions: { width: Math.round(finalSize.width), height: Math.round(finalSize.height) },
     segments,
     targetBounds: bounds,
-    actualSize,
-    actualBounds,
+    actualSize: {
+      width: formatCoordinate(Math.abs(actualXMax - actualXMin)),
+      height: formatCoordinate(Math.abs(actualYMax - actualYMin)),
+    },
+    actualBounds: {
+      xMin: formatCoordinate(actualXMin),
+      xMax: formatCoordinate(actualXMax),
+      yMin: formatCoordinate(actualYMin),
+      yMax: formatCoordinate(actualYMax),
+    },
   };
 };
 
@@ -670,6 +939,8 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
   const [activeDrawMode, setActiveDrawMode] = useState("image");
   const [isUploading, setIsUploading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
+  const [pendingImage, setPendingImage] = useState(null);
+  const [imageTraceMode, setImageTraceMode] = useState("contour");
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [stepDelay, setStepDelay] = useState(DEFAULT_STEP_DELAY);
@@ -687,9 +958,11 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
     width: workspaceWidth,
     height: workspaceHeight,
   });
+  const [plotAreaPercent, setPlotAreaPercent] = useState(100);
 
   const [textInput, setTextInput] = useState("");
   const [fontFamily, setFontFamily] = useState("Arial");
+  const [textSizePercent, setTextSizePercent] = useState(100);
 
   const selectedCommands = useMemo(
     () => (selectedFile ? getCommandLines(selectedFile.content) : []),
@@ -712,6 +985,11 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
     8,
     (selectedTargetBounds.height / Math.max(workspaceHeight, 1)) * 100,
   );
+  const livePlotPreviewUrl =
+    activeDrawMode === "image"
+      ? pendingImage?.previewUrl ??
+        (selectedFile?.type === "image" ? selectedFile.previewUrl : null)
+      : null;
 
   useEffect(() => {
     setActiveDrawMode(navMode === "text" ? "text" : "image");
@@ -751,6 +1029,7 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
       width: workspaceWidth,
       height: workspaceHeight,
     });
+    setPlotAreaPercent(100);
   }, [workspaceHeight, workspaceWidth]);
 
   const sendCommandLine = async (line) => {
@@ -845,20 +1124,55 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
     }
 
     setIsUploading(true);
-    setStatusMessage("Converting image to G-code...");
+    setStatusMessage("Loading image preview...");
 
-    convertImageToGCode(file, selectedTargetBounds)
+    readFileAsDataUrl(file)
+      .then((previewUrl) => {
+        if (typeof previewUrl !== "string") {
+          throw new Error("Image data was not readable");
+        }
+
+        setPendingImage({
+          file,
+          previewUrl,
+          uploadedAt: new Date().toLocaleString(),
+        });
+        setSelectedFile(null);
+        setStatusMessage("Image loaded. Choose width and height, then prepare it to run.");
+      })
+      .catch((error) => {
+        alert(error.message || "Image preview failed");
+        setStatusMessage("Image preview failed.");
+      })
+      .finally(() => {
+        setIsUploading(false);
+        input.value = "";
+      });
+  };
+
+  const handleImageConvert = () => {
+    if (!pendingImage?.file) {
+      alert("Upload an image first.");
+      return;
+    }
+
+    setIsUploading(true);
+    const traceModeLabel = IMAGE_TRACE_MODES[imageTraceMode]?.label ?? "Trace outline";
+    setStatusMessage(`${traceModeLabel} is preparing G-code with the selected width and height...`);
+
+    convertImageToGCode(pendingImage.file, selectedTargetBounds, imageTraceMode)
       .then((conversion) => {
         const newFile = {
           id: Date.now(),
-          name: file.name,
-          size: file.size,
+          name: pendingImage.file.name,
+          size: pendingImage.file.size,
           uploadedAt: new Date().toLocaleString(),
           content: conversion.content,
           lines: getCommandLines(conversion.content).length,
           previewUrl: conversion.previewUrl,
           imageDimensions: conversion.dimensions,
           drawSegments: conversion.segments,
+          traceMode: conversion.traceMode,
           targetBounds: conversion.targetBounds,
           actualPlotSize: conversion.actualSize,
           actualBounds: conversion.actualBounds,
@@ -867,9 +1181,8 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
 
         setFiles((previous) => [newFile, ...previous]);
         setSelectedFile(newFile);
-        setStatusMessage(
-          "Image converted to G-code successfully using the selected plot size.",
-        );
+        setCurrentStepIndex(0);
+        setStatusMessage("Image trace is prepared. You can now review and run the G-code.");
       })
       .catch((error) => {
         alert(error.message || "Image conversion failed");
@@ -877,7 +1190,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
       })
       .finally(() => {
         setIsUploading(false);
-        input.value = "";
       });
   };
 
@@ -894,6 +1206,7 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
       textInput,
       `bold 100px ${fontFamily}`,
       selectedTargetBounds,
+      textSizePercent,
     )
       .then((conversion) => {
         const newFile = {
@@ -983,14 +1296,34 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
   };
 
   const updatePlotSize = (field, value) => {
-    setPlotSize((previous) => ({
-      ...previous,
-      [field]: clampSize(
-        value,
-        1,
-        field === "width" ? workspaceWidth : workspaceHeight,
-      ),
-    }));
+    const nextValue = clampSize(
+      value,
+      1,
+      field === "width" ? workspaceWidth : workspaceHeight,
+    );
+    const nextPlotSize = {
+      ...plotSize,
+      [field]: nextValue,
+    };
+
+    setPlotSize(nextPlotSize);
+
+    const widthPercent = (nextPlotSize.width / Math.max(workspaceWidth, 1)) * 100;
+    const heightPercent = (nextPlotSize.height / Math.max(workspaceHeight, 1)) * 100;
+    setPlotAreaPercent(clampSize(Math.round(Math.min(widthPercent, heightPercent)), 10, 100));
+  };
+
+  const updatePlotAreaPercent = (value) => {
+    const nextPercent = clampSize(value, 10, 100);
+    setPlotAreaPercent(nextPercent);
+    setPlotSize({
+      width: clampSize((workspaceWidth * nextPercent) / 100, 1, workspaceWidth),
+      height: clampSize((workspaceHeight * nextPercent) / 100, 1, workspaceHeight),
+    });
+  };
+
+  const updateTextSizePercent = (value) => {
+    setTextSizePercent(clampSize(value, 10, 100));
   };
 
   const progressPercent =
@@ -1436,31 +1769,79 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
             </div>
 
             {isImageMode ? (
-              <label
-                style={{
-                  padding: "10px 14px",
-                  backgroundColor: "var(--accent-cyan)",
-                  color: "black",
-                  borderRadius: "4px",
-                  cursor: isUploading ? "not-allowed" : "pointer",
-                  fontWeight: "600",
-                  fontSize: "0.75rem",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "8px",
-                  opacity: isUploading ? 0.7 : 1,
-                }}
-              >
-                <Upload size={14} /> Upload Image
-                <input
-                  type="file"
-                  onChange={handleFileUpload}
-                  accept=".png,.jpg,.jpeg,image/png,image/jpeg"
-                  style={{ display: "none" }}
-                  disabled={isUploading}
-                />
-              </label>
+              <div style={{ display: "grid", gap: "10px" }}>
+                <label
+                  style={{
+                    padding: "10px 14px",
+                    backgroundColor: "var(--accent-cyan)",
+                    color: "black",
+                    borderRadius: "4px",
+                    cursor: isUploading ? "not-allowed" : "pointer",
+                    fontWeight: "600",
+                    fontSize: "0.75rem",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                    opacity: isUploading ? 0.7 : 1,
+                  }}
+                >
+                  <Upload size={14} /> Upload Image
+                  <input
+                    type="file"
+                    onChange={handleFileUpload}
+                    accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                    style={{ display: "none" }}
+                    disabled={isUploading}
+                  />
+                </label>
+                {pendingImage && (
+                  <div
+                    style={{
+                      fontSize: "0.7rem",
+                      color: "var(--text-secondary)",
+                      fontFamily: "var(--font-mono)",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    Loaded: {pendingImage.file.name}
+                  </div>
+                )}
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <div
+                    style={{
+                      fontSize: "0.65rem",
+                      color: "var(--text-secondary)",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Trace Mode
+                  </div>
+                  <select
+                    value={imageTraceMode}
+                    onChange={(event) => setImageTraceMode(event.target.value)}
+                    disabled={isUploading}
+                    style={controlFieldStyle}
+                  >
+                    {Object.entries(IMAGE_TRACE_MODES).map(([value, mode]) => (
+                      <option key={value} value={value}>
+                        {mode.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={handleImageConvert}
+                  disabled={isUploading || !pendingImage}
+                  style={{
+                    ...quietButtonStyle,
+                    cursor: isUploading || !pendingImage ? "not-allowed" : "pointer",
+                    opacity: isUploading || !pendingImage ? 0.5 : 1,
+                  }}
+                >
+                  Prepare Image to Run
+                </button>
+              </div>
             ) : (
               <>
                 <div style={{ display: "grid", gap: "8px" }}>
@@ -1473,19 +1854,19 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                   >
                     Plot Text
                   </div>
-                  <input
-                    type="text"
+                  <textarea
+                    rows={3}
                     value={textInput}
                     onChange={(event) => setTextInput(event.target.value)}
-                    placeholder="Enter text to plot..."
+                    placeholder={"Enter text to plot...\nUse Enter for new lines"}
                     disabled={isUploading}
-                    style={controlFieldStyle}
+                    style={{ ...controlFieldStyle, resize: "vertical", fontFamily: "inherit" }}
                   />
                 </div>
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                    gridTemplateColumns: "minmax(0, 1fr) 112px",
                     gap: "10px",
                     alignItems: "end",
                   }}
@@ -1513,6 +1894,39 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                       <option value="Verdana">Verdana</option>
                     </select>
                   </div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    <div
+                      style={{
+                        fontSize: "0.65rem",
+                        color: "var(--text-secondary)",
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      Text Size %
+                    </div>
+                    <input
+                      type="number"
+                      min="10"
+                      max="100"
+                      step="5"
+                      value={textSizePercent}
+                      onChange={(event) => updateTextSizePercent(event.target.value)}
+                      disabled={isUploading}
+                      style={{ ...controlFieldStyle, minWidth: 0 }}
+                    />
+                  </div>
+                </div>
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <input
+                    type="range"
+                    min="10"
+                    max="100"
+                    step="5"
+                    value={textSizePercent}
+                    onChange={(event) => updateTextSizePercent(event.target.value)}
+                    disabled={isUploading}
+                    style={{ width: "100%" }}
+                  />
                   <button
                     onClick={handleTextConvert}
                     disabled={isUploading || !textInput.trim()}
@@ -1554,6 +1968,56 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
               <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>
                 Choose the drawing size inside the full machine area before conversion.
               </div>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) 112px",
+                gap: "10px",
+                alignItems: "end",
+              }}
+            >
+              <div style={{ display: "grid", gap: "8px" }}>
+                <div
+                  style={{
+                    fontSize: "0.65rem",
+                    color: "var(--text-secondary)",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Plot Area Size
+                </div>
+                <input
+                  type="range"
+                  min="10"
+                  max="100"
+                  step="5"
+                  value={plotAreaPercent}
+                  onChange={(event) => updatePlotAreaPercent(event.target.value)}
+                  disabled={isUploading}
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <input
+                type="number"
+                min="10"
+                max="100"
+                step="5"
+                value={plotAreaPercent}
+                onChange={(event) => updatePlotAreaPercent(event.target.value)}
+                disabled={isUploading}
+                aria-label="Plot area size percentage"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  backgroundColor: "var(--bg-main)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "4px",
+                  color: "white",
+                  boxSizing: "border-box",
+                }}
+              />
             </div>
 
             <div
@@ -1674,6 +2138,12 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                     border: "2px solid var(--accent-cyan)",
                     borderRadius: "4px",
                     backgroundColor: "rgba(0, 240, 255, 0.12)",
+                    backgroundImage: livePlotPreviewUrl
+                      ? `url(${livePlotPreviewUrl})`
+                      : "none",
+                    backgroundSize: "contain",
+                    backgroundPosition: "center",
+                    backgroundRepeat: "no-repeat",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -1685,7 +2155,8 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                     boxSizing: "border-box",
                   }}
                 >
-                  {selectedTargetBounds.width} x {selectedTargetBounds.height}
+                  {!livePlotPreviewUrl &&
+                    `${selectedTargetBounds.width} x ${selectedTargetBounds.height}`}
                 </div>
                 <div
                   style={{
@@ -1799,6 +2270,47 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                         {selectedCommands.length}
                       </div>
                     </div>
+                    {selectedFile.type === "image" && (
+                      <>
+                        <div>
+                          <div
+                            style={{
+                              fontSize: "0.65rem",
+                              color: "var(--text-secondary)",
+                            }}
+                          >
+                            Trace
+                          </div>
+                          <div
+                            style={{
+                              fontSize: "0.8rem",
+                              color: "var(--accent-cyan)",
+                            }}
+                          >
+                            {IMAGE_TRACE_MODES[selectedFile.traceMode]?.label ??
+                              IMAGE_TRACE_MODES.contour.label}
+                          </div>
+                        </div>
+                        <div>
+                          <div
+                            style={{
+                              fontSize: "0.65rem",
+                              color: "var(--text-secondary)",
+                            }}
+                          >
+                            Strokes
+                          </div>
+                          <div
+                            style={{
+                              fontSize: "0.8rem",
+                              color: "var(--accent-peach)",
+                            }}
+                          >
+                            {selectedFile.drawSegments ?? 0}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -1924,7 +2436,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                   <button
                     onClick={sendSingleStep}
                     disabled={
-                      !esp32?.connected ||
                       !selectedFile ||
                       isSendingStep ||
                       currentStepIndex >= selectedCommands.length
@@ -1938,7 +2449,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                       fontWeight: "600",
                       fontSize: "0.75rem",
                       cursor:
-                        !esp32?.connected ||
                         !selectedFile ||
                         isSendingStep ||
                         currentStepIndex >= selectedCommands.length
@@ -1949,7 +2459,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                       justifyContent: "center",
                       gap: "8px",
                       opacity:
-                        !esp32?.connected ||
                         !selectedFile ||
                         isSendingStep ||
                         currentStepIndex >= selectedCommands.length
@@ -1964,7 +2473,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                     <button
                       onClick={handleRunAll}
                       disabled={
-                        !esp32?.connected ||
                         !selectedFile ||
                         isSendingStep ||
                         isRunning
@@ -1979,7 +2487,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                         fontWeight: "600",
                         fontSize: "0.75rem",
                         cursor:
-                          !esp32?.connected ||
                           !selectedFile ||
                           isSendingStep ||
                           isRunning
@@ -1990,7 +2497,6 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                         justifyContent: "center",
                         gap: "8px",
                         opacity:
-                          !esp32?.connected ||
                           !selectedFile ||
                           isSendingStep ||
                           isRunning
