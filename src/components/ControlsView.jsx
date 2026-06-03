@@ -104,6 +104,7 @@ const ControlsPreview = ({ coordinates, serial }) => {
 const ControlsView = ({ serial, coordinates }) => {
   const [jogStep, setJogStep] = useState(1.0);
   const [feedRate, setFeedRate] = useState(1000);
+  const jogCooldownRef = React.useRef(false);
 
   const returnToStart = async () => {
     if (!serial || !serial.connected) return;
@@ -112,38 +113,21 @@ const ControlsView = ({ serial, coordinates }) => {
 
   const jog = (dx, dy, dz = 0) => {
     if (!serial || !serial.connected) return;
-    const xMin = Math.min(coordinates?.xMin ?? 0, coordinates?.xMax ?? 0);
-    const xMax = Math.max(coordinates?.xMin ?? 0, coordinates?.xMax ?? 0);
-    const yMin = Math.min(coordinates?.yMin ?? 0, coordinates?.yMax ?? 0);
-    const yMax = Math.max(coordinates?.yMin ?? 0, coordinates?.yMax ?? 0);
 
-    const currentX = Number(serial?.position?.x ?? 0);
-    const currentY = Number(serial?.position?.y ?? 0);
-    const nextX = clampTarget(currentX + dx * jogStep, xMin, xMax);
-    const nextY = clampTarget(currentY + dy * jogStep, yMin, yMax);
-    const limitedDx = nextX - currentX;
-    const limitedDy = nextY - currentY;
+    // Throttle: prevent rapid-fire commands from overwhelming GRBL's serial buffer
+    if (jogCooldownRef.current) return;
+    jogCooldownRef.current = true;
+    setTimeout(() => { jogCooldownRef.current = false; }, 150);
 
-    if (dx !== 0 && Math.abs(limitedDx) < 0.0005 && dy === 0 && dz === 0) {
-      return;
-    }
-
-    if (dy !== 0 && Math.abs(limitedDy) < 0.0005 && dx === 0 && dz === 0) {
-      return;
-    }
-
-    if (dx !== 0 && dy !== 0 && Math.abs(limitedDx) < 0.0005 && Math.abs(limitedDy) < 0.0005) {
-      return;
-    }
-
-    const x = limitedDx.toFixed(3);
-    const y = limitedDy.toFixed(3);
+    const x = (dx * jogStep).toFixed(3);
+    const y = (dy * jogStep).toFixed(3);
     const z = (dz * jogStep).toFixed(3);
     
-    // Using standard G0 instead of $J for compatibility with GRBL v0.9 and older CNC shields
+    // G91 sets relative mode within this command; other commands (returnToStart, sendGCode)
+    // already specify G90, so no need to send a separate G90 follow-up that can flood the buffer
     let cmd = `G91 G0 F${feedRate} `;
-    if (Math.abs(limitedDx) >= 0.0005) cmd += `X${x} `;
-    if (Math.abs(limitedDy) >= 0.0005) cmd += `Y${y} `;
+    if (dx !== 0) cmd += `X${x} `;
+    if (dy !== 0) cmd += `Y${y} `;
     if (dz !== 0) cmd += `Z${z}`;
 
     if (cmd.trim() === `G91 G0 F${feedRate}`) {
@@ -151,8 +135,6 @@ const ControlsView = ({ serial, coordinates }) => {
     }
     
     serial.sendCommand(cmd.trim());
-    // Switch back to absolute mode just in case
-    setTimeout(() => serial.sendCommand('G90'), 50);
   };
 
   return (

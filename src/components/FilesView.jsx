@@ -5,6 +5,7 @@ import {
   Eye,
   AlertCircle,
   Image as ImageIcon,
+  HelpCircle,
   Type,
   Pause,
   Play,
@@ -30,6 +31,8 @@ const RAPID_FEED = 3000;
 const DRAW_FEED = 1200;
 const DEFAULT_STEP_DELAY = 500;
 const MIN_DARKNESS_THRESHOLD = 24;
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
+const DEFAULT_OLLAMA_MODEL = "llama3.2";
 const IMAGE_TRACE_MODES = {
   contour: {
     label: "Trace outline",
@@ -58,6 +61,15 @@ const DRAWING_MODES = {
     emptyHint: "Enter text, choose a font, and convert it into G-code.",
     viewerHint: "Convert a text drawing to inspect the generated G-code.",
     previewLabel: "Text Drawing",
+  },
+  "ask-ai": {
+    title: "Ask AI",
+    shortTitle: "AI",
+    inputLabel: "AI Question",
+    emptyTitle: "No AI answers yet",
+    emptyHint: "Ask a question, draft an answer, and convert it into G-code.",
+    viewerHint: "Generate an answer, adjust the size, and convert it for plotting.",
+    previewLabel: "AI Answer",
   },
 };
 
@@ -103,6 +115,69 @@ const buildOriginBounds = (coordinates, plotWidth, plotHeight) => {
     width: formatCoordinate(safeWidth),
     height: formatCoordinate(safeHeight),
   };
+};
+
+const cleanOllamaBaseUrl = (baseUrl) =>
+  String(baseUrl || DEFAULT_OLLAMA_BASE_URL).trim().replace(/\/+$/, "");
+
+const normalizeOllamaAnswer = (answer) => {
+  const strippedMarkdown = String(answer || "")
+    .replace(/\*\*/g, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const words = strippedMarkdown.split(" ").filter(Boolean);
+  return words.slice(0, 49).join(" ");
+};
+
+const buildOllamaPrompt = (question) => {
+  const cleanedQuestion = question.trim().replace(/\s+/g, " ");
+
+  return [
+    "You are helping write a short answer that will be plotted on a pen plotter.",
+    "Reply in plain text only.",
+    "Do not use markdown, bullets, or asterisks.",
+    "Use fewer than 50 words total.",
+    "Keep the reply concise, readable, and suitable for printing.",
+    "",
+    `Question: ${cleanedQuestion}`,
+  ].join("\n");
+};
+
+const requestOllamaAnswer = async (question, model, baseUrl) => {
+  const response = await fetch(`${cleanOllamaBaseUrl(baseUrl)}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: model.trim() || DEFAULT_OLLAMA_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: buildOllamaPrompt(question),
+        },
+      ],
+      stream: false,
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error ||
+        `Ollama request failed with status ${response.status}. Is Ollama running?`,
+    );
+  }
+
+  const answer = payload?.message?.content;
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new Error("Ollama returned an empty answer.");
+  }
+
+  return normalizeOllamaAnswer(answer);
 };
 
 const loadImageElement = (source) =>
@@ -961,6 +1036,9 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
   const [plotAreaPercent, setPlotAreaPercent] = useState(100);
 
   const [textInput, setTextInput] = useState("");
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [ollamaModel, setOllamaModel] = useState(DEFAULT_OLLAMA_MODEL);
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState(DEFAULT_OLLAMA_BASE_URL);
   const [fontFamily, setFontFamily] = useState("Arial");
   const [textSizePercent, setTextSizePercent] = useState(100);
 
@@ -992,7 +1070,9 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
       : null;
 
   useEffect(() => {
-    setActiveDrawMode(navMode === "text" ? "text" : "image");
+    setActiveDrawMode(
+      navMode === "text" ? "text" : navMode === "ask-ai" ? "ask-ai" : "image",
+    );
   }, [navMode]);
 
   useEffect(() => {
@@ -1195,12 +1275,14 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
 
   const handleTextConvert = () => {
     if (!textInput.trim()) {
-      alert("Please enter some text.");
+      alert(isAskAiMode ? "Generate or enter an answer first." : "Please enter some text.");
       return;
     }
 
     setIsUploading(true);
-    setStatusMessage("Converting text to G-code...");
+    setStatusMessage(
+      isAskAiMode ? "Converting AI answer to G-code..." : "Converting text to G-code...",
+    );
 
     convertTextToGCode(
       textInput,
@@ -1211,7 +1293,9 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
       .then((conversion) => {
         const newFile = {
           id: Date.now(),
-          name: `Text: ${textInput}`,
+          name: isAskAiMode
+            ? `Ask AI: ${aiQuestion.trim().slice(0, 40) || "Draft Answer"}`
+            : `Text: ${textInput}`,
           size: conversion.content.length,
           uploadedAt: new Date().toLocaleString(),
           content: conversion.content,
@@ -1222,13 +1306,15 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
           targetBounds: conversion.targetBounds,
           actualPlotSize: conversion.actualSize,
           actualBounds: conversion.actualBounds,
-          type: "text",
+          type: activeDrawMode,
         };
 
         setFiles((previous) => [newFile, ...previous]);
         setSelectedFile(newFile);
         setStatusMessage(
-          "Text converted to G-code successfully using the selected plot size.",
+          isAskAiMode
+            ? "AI answer converted to G-code successfully using the selected plot size."
+            : "Text converted to G-code successfully using the selected plot size.",
         );
         setTextInput("");
       })
@@ -1326,15 +1412,50 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
     setTextSizePercent(clampSize(value, 10, 100));
   };
 
+  const handleGenerateAiAnswer = async () => {
+    if (!aiQuestion.trim()) {
+      alert("Ask a question first.");
+      return;
+    }
+
+    setIsUploading(true);
+    setStatusMessage("Sending question to Ollama...");
+
+    try {
+      const generatedAnswer = await requestOllamaAnswer(
+        aiQuestion,
+        ollamaModel,
+        ollamaBaseUrl,
+      );
+      setTextInput(generatedAnswer);
+      setStatusMessage(
+        "Ollama answer generated. Review it, adjust the size, then convert it for plotting.",
+      );
+    } catch (error) {
+      alert(error.message || "Ollama request failed.");
+      setStatusMessage(
+        "Ollama request failed. Make sure Ollama is running and the selected model is installed.",
+      );
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const progressPercent =
     selectedCommands.length === 0
       ? 0
       : Math.round((currentStepIndex / selectedCommands.length) * 100);
   const imageFileCount = files.filter((file) => file.type === "image").length;
   const textFileCount = files.filter((file) => file.type === "text").length;
+  const askAiFileCount = files.filter((file) => file.type === "ask-ai").length;
   const isImageMode = activeDrawMode === "image";
-  const activeModeCount = isImageMode ? imageFileCount : textFileCount;
-  const ActiveModeIcon = isImageMode ? ImageIcon : Type;
+  const isAskAiMode = activeDrawMode === "ask-ai";
+  const activeModeCount = isImageMode
+    ? imageFileCount
+    : isAskAiMode
+      ? askAiFileCount
+      : textFileCount;
+  const ActiveModeIcon = isImageMode ? ImageIcon : isAskAiMode ? HelpCircle : Type;
   const modeCardStyle = {
     backgroundColor: "rgba(0, 240, 255, 0.08)",
     border: "1px solid var(--accent-cyan)",
@@ -1738,7 +1859,11 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                 <ActiveModeIcon size={18} color="var(--accent-cyan)" />
                 <div>
                   <div style={{ fontSize: "0.82rem", fontWeight: "600" }}>
-                    {isImageMode ? "Image Drawing" : "Text Drawing"}
+                    {isImageMode
+                      ? "Image Drawing"
+                      : isAskAiMode
+                        ? "Ask AI"
+                        : "Text Drawing"}
                   </div>
                   <div
                     style={{
@@ -1748,7 +1873,9 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                   >
                     {isImageMode
                       ? "Upload and convert raster artwork into plot-ready G-code."
-                      : "Type a label or phrase, then convert it with its own settings."}
+                      : isAskAiMode
+                        ? "Ask a question, draft an answer, then size it for plotting."
+                        : "Type a label or phrase, then convert it with its own settings."}
                   </div>
                 </div>
               </div>
@@ -1842,6 +1969,135 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                   Prepare Image to Run
                 </button>
               </div>
+            ) : isAskAiMode ? (
+              <div style={{ display: "grid", gap: "10px" }}>
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <div
+                    style={{
+                      fontSize: "0.65rem",
+                      color: "var(--text-secondary)",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Ask AI Question
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={aiQuestion}
+                    onChange={(event) => setAiQuestion(event.target.value)}
+                    placeholder="Ask a question, then generate an answer you can print..."
+                    disabled={isUploading}
+                    style={{ ...controlFieldStyle, resize: "vertical", fontFamily: "inherit" }}
+                  />
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) 170px",
+                    gap: "10px",
+                  }}
+                >
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    <div
+                      style={{
+                        fontSize: "0.65rem",
+                        color: "var(--text-secondary)",
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      Ollama Base URL
+                    </div>
+                    <input
+                      type="text"
+                      value={ollamaBaseUrl}
+                      onChange={(event) => setOllamaBaseUrl(event.target.value)}
+                      placeholder="http://localhost:11434"
+                      disabled={isUploading}
+                      style={{ ...controlFieldStyle, minWidth: 0 }}
+                    />
+                  </div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    <div
+                      style={{
+                        fontSize: "0.65rem",
+                        color: "var(--text-secondary)",
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      Ollama Model
+                    </div>
+                    <input
+                      type="text"
+                      value={ollamaModel}
+                      onChange={(event) => setOllamaModel(event.target.value)}
+                      placeholder="llama3.2"
+                      disabled={isUploading}
+                      style={{ ...controlFieldStyle, minWidth: 0 }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    onClick={handleGenerateAiAnswer}
+                    disabled={isUploading || !aiQuestion.trim()}
+                    style={{
+                      ...quietButtonStyle,
+                      cursor:
+                        isUploading || !aiQuestion.trim() ? "not-allowed" : "pointer",
+                      opacity: isUploading || !aiQuestion.trim() ? 0.5 : 1,
+                    }}
+                    >
+                    Generate Live Answer
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAiQuestion("");
+                      setTextInput("");
+                    }}
+                    disabled={isUploading}
+                    style={{
+                      ...quietButtonStyle,
+                      cursor: isUploading ? "not-allowed" : "pointer",
+                      opacity: isUploading ? 0.5 : 1,
+                    }}
+                    >
+                    Clear
+                  </button>
+                </div>
+
+                <div
+                  style={{
+                    fontSize: "0.68rem",
+                    color: "var(--text-secondary)",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Ollama should be running locally, and the selected model should be installed.
+                  You can change the base URL or model if your setup is different.
+                </div>
+
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <div
+                    style={{
+                      fontSize: "0.65rem",
+                      color: "var(--text-secondary)",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    AI Answer
+                  </div>
+                  <textarea
+                    rows={5}
+                    value={textInput}
+                    onChange={(event) => setTextInput(event.target.value)}
+                    placeholder="Your answer will appear here. You can edit it before converting it to G-code."
+                    disabled={isUploading}
+                    style={{ ...controlFieldStyle, resize: "vertical", fontFamily: "inherit" }}
+                  />
+                </div>
+              </div>
             ) : (
               <>
                 <div style={{ display: "grid", gap: "8px" }}>
@@ -1902,7 +2158,7 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                         textTransform: "uppercase",
                       }}
                     >
-                      Text Size %
+                      {isAskAiMode ? "Answer Size %" : "Text Size %"}
                     </div>
                     <input
                       type="number"
@@ -1937,7 +2193,7 @@ const FilesView = ({ esp32, coordinates, navMode = "image" }) => {
                       opacity: isUploading || !textInput.trim() ? 0.5 : 1,
                     }}
                   >
-                    Convert Text
+                    {isAskAiMode ? "Convert Answer" : "Convert Text"}
                   </button>
                 </div>
               </>

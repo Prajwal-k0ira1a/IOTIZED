@@ -12,6 +12,7 @@ import {
   Plug,
   PlugZap,
   ScanSearch,
+  User,
 } from 'lucide-react';
 
 import DashboardView from './components/DashboardView';
@@ -19,6 +20,7 @@ import FilesView from './components/FilesView';
 import ControlsView from './components/ControlsView';
 import TerminalView from './components/TerminalView';
 import CoordinatesWizardView from './components/CoordinatesWizardView';
+import DrawPersonView from './components/DrawPersonView';
 import { useSerial } from './hooks/useSerial';
 
 const DEFAULT_COORDINATES = {
@@ -188,6 +190,20 @@ function App() {
               Text Drawing
             </div>
             <div
+              className={`nav-item ${activeTab === 'ask-ai' ? 'active' : ''}`}
+              onClick={() => setActiveTab('ask-ai')}
+            >
+              <HelpCircle size={20} />
+              Ask AI
+            </div>
+            <div
+              className={`nav-item ${activeTab === 'draw-person' ? 'active' : ''}`}
+              onClick={() => setActiveTab('draw-person')}
+            >
+              <User size={20} />
+              Draw a person
+            </div>
+            <div
               className={`nav-item ${activeTab === 'coordinates' ? 'active' : ''}`}
               onClick={() => setActiveTab('coordinates')}
             >
@@ -225,6 +241,16 @@ function App() {
               coordinates={coordinates}
               navMode="text"
             />
+          )}
+          {activeTab === 'ask-ai' && (
+            <FilesView
+              esp32={serial}
+              coordinates={coordinates}
+              navMode="ask-ai"
+            />
+          )}
+          {activeTab === 'draw-person' && (
+            <DrawPersonView serial={serial} coordinates={coordinates} />
           )}
           {activeTab === 'controls' && (
             <ControlsView serial={serial} coordinates={coordinates} />
