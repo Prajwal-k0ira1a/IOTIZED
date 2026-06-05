@@ -292,8 +292,17 @@ const DrawPersonView = ({ serial, coordinates }) => {
                   <div style={{ fontSize: '0.75rem' }}>Upload a photo to generate squiggle art</div>
                 </div>
               ) : (
-                <div style={{ backgroundColor: '#fff', borderRadius: '4px', border: '1px solid var(--border-color)', overflow: 'hidden', display: 'flex', justifyContent: 'center', maxWidth: '100%' }}>
-                  <canvas ref={canvasRef} style={{ width: '100%', height: 'auto', maxHeight: '450px', objectFit: 'contain', display: 'block' }} />
+                <div style={{ backgroundColor: '#fff', borderRadius: '4px', border: '1px solid var(--border-color)', overflow: 'hidden', display: 'flex', justifyContent: 'center', width: '100%', maxWidth: '560px', margin: '0 auto' }}>
+                  <canvas
+                    ref={canvasRef}
+                    style={{
+                      width: '100%',
+                      height: 'auto',
+                      maxHeight: '450px',
+                      objectFit: 'contain',
+                      display: 'block',
+                    }}
+                  />
                 </div>
               )}
             </div>
